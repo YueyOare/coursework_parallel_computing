@@ -1,13 +1,13 @@
 import os
-import pandas as pd
-import numpy as np
-import torch
-import sys
-from transformers import DistilBertModel, DistilBertTokenizer
 from collections import defaultdict
+from typing import Dict, List, Union
+
+import numpy as np
+import pandas as pd
+import torch
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from typing import Dict, List, Union
+from transformers import DistilBertModel, DistilBertTokenizer
 
 
 class BookEmbeddings:
@@ -145,7 +145,8 @@ class InvertedIndex:
         Збереження книг у CSV файл.
         """
         try:
-            pd.DataFrame(self.books.values()).to_csv(self.books_file, index=False)
+            books_data = [{"id": doc_id, **book_data} for doc_id, book_data in self.books.items()]
+            pd.DataFrame(books_data).to_csv(self.books_file, index=False)
         except Exception as e:
             raise RuntimeError(f"Error saving books: {e}")
 
@@ -154,7 +155,7 @@ class InvertedIndex:
         Збереження ембеддінгів у CSV файл.
         """
         try:
-            embeddings_data = [{"id": doc_id, "embedding": embedding} for doc_id, embedding in
+            embeddings_data = [{"id": int(doc_id), "embedding": embedding} for doc_id, embedding in
                                self.embeddings.items()]
             pd.DataFrame(embeddings_data).to_csv(self.embeddings_file, index=False)
         except Exception as e:
@@ -200,7 +201,7 @@ class InvertedIndex:
         """
         tokens = self.tokenize(description)
         for token in tokens:
-            self.index[token].add(doc_id)
+            self.index[token].add(int(doc_id))
 
     def update_embeddings(self, doc_id: int, description: str) -> None:
         """
@@ -214,16 +215,19 @@ class InvertedIndex:
         except Exception as e:
             raise RuntimeError(f"Error updating embedding: {e}")
 
-    def add_book(self, new_book: Dict[str, Union[str, int]]) -> int:
+    def add_book(self, new_book: Dict[str, Union[str, int]], given_id=None) -> int:
         """
         Додавання нової книги до індексу та ембеддінгів.
 
         :param new_book: Словник з атрибутами нової книги.
+        :param given_id: Id з яким треба зберегти книгу (за замовчанням встановлюється рівним останньому значенню в базі +1).
         :return: Ідентифікатор доданої книги.
         """
         try:
-            doc_id = len(self.books)
-            self.books[doc_id] = new_book
+            doc_id = len(self.books) if given_id is None else given_id
+            default_book = {"title": "", "author": "", "description": "", "isbn": 0, "publish_year": 0, "genre": ""}
+            book_data = {key: new_book.get(key, default_book[key]) for key in default_book}
+            self.books[doc_id] = book_data
             description = format_book_description(new_book)
             self.add_tokens_to_index(doc_id, description)
             self.update_embeddings(doc_id, description)
@@ -232,7 +236,7 @@ class InvertedIndex:
             self.save_embeddings()
             return doc_id
         except Exception as e:
-            raise RuntimeError(f"Error adding book: {e}")
+            raise e
 
     def delete_book(self, doc_id: int) -> None:
         """
@@ -256,7 +260,7 @@ class InvertedIndex:
             else:
                 raise ValueError(f"Book with ID {doc_id} not found.")
         except Exception as e:
-            raise RuntimeError(f"Error deleting book: {e}")
+            raise e
 
     def update_book(self, doc_id: int, updated_data: Dict[str, Union[str, int]]) -> None:
         """
@@ -267,36 +271,35 @@ class InvertedIndex:
         """
         try:
             if doc_id in self.books:
+                current_data = self.books[doc_id]
+                new_data = {key: updated_data.get(key, current_data[key]) for key in current_data}
                 self.delete_book(doc_id)
-                self.add_book({**self.books[doc_id], **updated_data})
+                self.add_book(new_data, doc_id)
             else:
                 raise ValueError(f"Book with ID {doc_id} not found.")
         except Exception as e:
-            raise RuntimeError(f"Error updating book: {e}")
+            raise e
 
 
 if __name__ == "__main__":
-    try:
-        embedding_generator = BookEmbeddings()
-        index = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv")
 
-        test_query = "story about genius detective"
-        tokens = index.tokenize(test_query)
-        print(tokens)
+    embedding_generator = BookEmbeddings()
+    index = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv")
 
-        # Додавання нової книги
-        book_id = index.add_book(
-            {"title": "New Book", "author": "Author Name", "description": "A fascinating tale.", "isbn": "12345",
-             "publish_year": 2024, "genre": "Fiction"})
+    test_query = "story about genius detective"
+    tokens = index.tokenize(test_query)
+    print(tokens)
 
-        # Оновлення книги
-        index.update_book(book_id, {"title": "Updated Book"})
+    # Додавання нової книги
+    book_id = index.add_book(
+        {"title": "New Book", "author": "Author Name", "description": "A fascinating tale.", "isbn": "12345",
+         "publish_year": 2024, "genre": "Fiction"})
+    #
+    # # Оновлення книги
+    index.update_book(book_id, {"title": "Updated Book"})
 
-        # Видалення книги
-        index.delete_book(book_id)
-    except Exception as e:
-        print(f"An error occurred: {e}")
-        sys.exit(1)  # Завершити програму з кодом помилки
+    # Видалення книги
+    index.delete_book(book_id)
 
     # data = pd.read_csv('books_database_with_descriptions.csv')
     # for i, _ in data.iterrows():
