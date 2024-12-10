@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Book Search</title>
+    <link rel="stylesheet" type="text/css" href="/static/style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Book Search</h1>
+    <form id="searchForm">
+        <input type="text" id="user_query" name="user_query" placeholder="Enter your query here...">
+        <button type="button" onclick="sendSearch()">Search</button>
+        <button type="button" onclick="clearHistory()">Clear History</button>
+    </form>
+
+    <div class="previous-queries">
+        <h2>Previous Queries:</h2>
+        <div id="queriesList">
+            {% for query in previous_queries %}
+            <div class="query-item" data-index="{{ loop.index0 }}">
+                <span>{{ query }}</span>
+                <button type="button" onclick="deleteQuery({{ loop.index0 }})">Delete</button>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <div class="recommendations">
+        <h2>Recommended Books:</h2>
+        <table id="recommendationsTable">
+            <tr>
+                <th>#</th>
+                <th>Title</th>
+                <th>Author</th>
+                <th>ISBN</th>
+                <th>Description</th>
+                <th>Relevance (%)</th>
+            </tr>
+        </table>
+    </div>
+</div>
+
+<script>
+    // Отправка поискового запроса
+    function sendSearch() {
+        const query = document.getElementById('user_query').value;
+
+        if (!query) {
+            console.log('Please enter a query.');
+            return;
+        }
+
+        const requestData = JSON.stringify({ action: "search", user_query: query });
+
+        fetch('/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: requestData
+        })
+        .then(response => response.json())
+        .then(data => {
+            updateRecommendations(data.recommendations);
+            updateQueries(data.previous_queries);
+        })
+        .catch(error => console.error('Error:', error));
+    }
+
+    // Очистка истории запросов
+    function clearHistory() {
+        fetch('/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: "clear" })
+        })
+        .then(response => response.json())
+        .then(data => {
+            updateRecommendations([]);
+            updateQueries([]);
+        })
+        .catch(error => console.error('Error:', error));
+    }
+
+    // Удаление определенного запроса
+    function deleteQuery(index) {
+        fetch('/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: "delete", index: index })
+        })
+        .then(response => response.json())
+        .then(data => {
+            updateRecommendations(data.recommendations);
+            updateQueries(data.previous_queries);
+        })
+        .catch(error => console.error('Error:', error));
+    }
+
+    // Обновление таблицы рекомендаций книг
+    function updateRecommendations(recommendations) {
+        const table = document.getElementById('recommendationsTable');
+        table.querySelectorAll('tr:not(:first-child)').forEach(row => row.remove());
+
+        recommendations.forEach((book, index) => {
+            const row = table.insertRow();
+            row.innerHTML = `
+                <td>${index + 1}</td>
+                <td>${book.title || '-'}</td>
+                <td>${book.author || '-'}</td>
+                <td>
+                    <div class="container-grid">
+                        ${book.isbn ? `
+                            <div class="details">${book.isbn}</div>
+                            <button class="expand-button" onclick="toggleDetails(this)">
+                                <span class="expand-icon">▼</span>
+                            </button>` : '-'}
+                    </div>
+                </td>
+                <td>
+                    <div class="container-grid">
+                        ${book.description ? `
+                            <div class="details">${book.description}</div>
+                            <button class="expand-button" onclick="toggleDetails(this)">
+                                <span class="expand-icon">▼</span>
+                            </button>` : '-'}
+                    </div>
+                </td>
+                <td>
+                    <div style="white-space: nowrap">
+                        Title: ${(book.title_similarity).toFixed(2)}%<br>
+                        Author: ${(book.author_similarity).toFixed(2)}%<br>
+                        Description: ${(book.description_similarity * 100).toFixed(2)}%
+                    </div>
+                </td>
+            `;
+        });
+    }
+
+    // Обновление списка предыдущих запросов
+    function updateQueries(queries) {
+        const queriesList = document.getElementById('queriesList');
+        queriesList.innerHTML = '';
+
+        queries.forEach((query, index) => {
+            const queryItem = document.createElement('div');
+            queryItem.className = 'query-item';
+            queryItem.dataset.index = index;
+
+            queryItem.innerHTML = `
+                <span>${query}</span>
+                <button type="button" onclick="deleteQuery(${index})">Delete</button>
+            `;
+
+            queriesList.appendChild(queryItem);
+        });
+    }
+
+    // Разворачивание и сворачивание текста
+    function toggleDetails(element) {
+        const details = element.previousElementSibling;
+        const isExpanded = details.style.height === 'auto';
+        details.style.height = isExpanded ? '1.2em' : 'auto';
+        details.style.whiteSpace = isExpanded ? 'nowrap' : 'normal';
+        element.querySelector('.expand-icon').textContent = isExpanded ? '▼' : '▲';
+    }
+</script>
+</body>
+</html>
