@@ -1,6 +1,7 @@
 import os
 from collections import defaultdict
-from typing import Dict, List, Union
+from multiprocessing import Manager, Lock
+from typing import Dict, List, Union, Any
 
 import numpy as np
 import pandas as pd
@@ -85,6 +86,12 @@ class InvertedIndex:
         self.books_file = books_file
         self.embeddings_file = embeddings_file
 
+        self.manager = Manager()
+        self.index = self.manager.dict()
+        self.books = self.manager.dict()
+        self.embeddings = self.manager.dict()
+        self.lock = Lock()
+
         try:
             self.load_data()
         except Exception as e:
@@ -106,9 +113,10 @@ class InvertedIndex:
         """
         if os.path.exists(self.books_file):
             try:
-                books_df = pd.read_csv(self.books_file)
-                for _, row in books_df.iterrows():
-                    self.books[row['id']] = row.to_dict()
+                with self.lock:
+                    books_df = pd.read_csv(self.books_file)
+                    for _, row in books_df.iterrows():
+                        self.books[row['id']] = row.to_dict()
             except Exception as e:
                 raise RuntimeError(f"Error loading books: {e}")
 
@@ -116,15 +124,39 @@ class InvertedIndex:
         """
         Завантаження ембеддінгів з CSV файлу.
 
-        Якщо файл не існує, ембеддінги не завантажуються.
+        Якщо файл не існує або кількість ембеддінгів не відповідає кількості книг,
+        ембеддінги перегенеровуються та зберігаються.
         """
         if os.path.exists(self.embeddings_file):
             try:
                 embeddings_df = pd.read_csv(self.embeddings_file)
                 for _, row in embeddings_df.iterrows():
                     self.embeddings[row['id']] = np.fromstring(row['embedding'].strip("[]"), sep=" ")
+
+                # Перевірка, чи кількість ембеддінгів відповідає кількості книг
+                if len(self.embeddings) != len(self.books):
+                    print("Mismatch between embeddings and books. Regenerating embeddings...")
+                    self.recalculate_and_save_embeddings()
             except Exception as e:
                 raise RuntimeError(f"Error loading embeddings: {e}")
+        else:
+            # Якщо файл не існує, генеруємо ембеддінги заново
+            print("Embeddings file not found. Generating embeddings...")
+            self.recalculate_and_save_embeddings()
+
+    def recalculate_and_save_embeddings(self) -> None:
+        """
+        Перегенерація ембеддінгів для всіх книг і збереження їх у файл.
+        """
+        try:
+            self.embeddings = {}
+            for doc_id, book in self.books.items():
+                description = format_book_description(book)
+                self.embeddings[doc_id] = self.embedding_generator.get_embedding(description)
+            self.save_embeddings()
+            print("Embeddings successfully regenerated and saved.")
+        except Exception as e:
+            raise RuntimeError(f"Error recalculating embeddings: {e}")
 
     def load_index(self) -> None:
         """
@@ -132,9 +164,10 @@ class InvertedIndex:
         """
         if os.path.exists(self.index_file):
             try:
-                index_df = pd.read_csv(self.index_file)
-                for _, row in index_df.iterrows():
-                    self.index[row['token']] = set(map(int, row['doc_ids'].split(',')))
+                with self.lock:
+                    index_df = pd.read_csv(self.index_file)
+                    for _, row in index_df.iterrows():
+                        self.index[row['token']] = set(map(int, row['doc_ids'].split(',')))
             except Exception as e:
                 raise RuntimeError(f"Error loading index: {e}")
         else:
@@ -145,8 +178,9 @@ class InvertedIndex:
         Збереження книг у CSV файл.
         """
         try:
-            books_data = [{"id": doc_id, **book_data} for doc_id, book_data in self.books.items()]
-            pd.DataFrame(books_data).to_csv(self.books_file, index=False)
+            with self.lock:
+                books_data = [{"id": doc_id, **book_data} for doc_id, book_data in self.books.items()]
+                pd.DataFrame(books_data).to_csv(self.books_file, index=False)
         except Exception as e:
             raise RuntimeError(f"Error saving books: {e}")
 
@@ -155,9 +189,10 @@ class InvertedIndex:
         Збереження ембеддінгів у CSV файл.
         """
         try:
-            embeddings_data = [{"id": int(doc_id), "embedding": embedding} for doc_id, embedding in
-                               self.embeddings.items()]
-            pd.DataFrame(embeddings_data).to_csv(self.embeddings_file, index=False)
+            with self.lock:
+                embeddings_data = [{"id": int(doc_id), "embedding": embedding} for doc_id, embedding in
+                                   self.embeddings.items()]
+                pd.DataFrame(embeddings_data).to_csv(self.embeddings_file, index=False)
         except Exception as e:
             raise RuntimeError(f"Error saving embeddings: {e}")
 
@@ -166,9 +201,10 @@ class InvertedIndex:
         Збереження інвертованого індексу у CSV файл.
         """
         try:
-            index_data = [{"token": token, "doc_ids": ','.join(map(str, doc_ids))} for token, doc_ids in
-                          self.index.items()]
-            pd.DataFrame(index_data).to_csv(self.index_file, index=False)
+            with self.lock:
+                index_data = [{"token": token, "doc_ids": ','.join(map(str, doc_ids))} for token, doc_ids in
+                              self.index.items()]
+                pd.DataFrame(index_data).to_csv(self.index_file, index=False)
         except Exception as e:
             raise RuntimeError(f"Error saving index: {e}")
 
@@ -201,6 +237,8 @@ class InvertedIndex:
         """
         tokens = self.tokenize(description)
         for token in tokens:
+            if token not in self.index:
+                self.index[token] = set()  # Ініціалізуємо множину для токена
             self.index[token].add(int(doc_id))
 
     def update_embeddings(self, doc_id: int, description: str) -> None:
@@ -220,17 +258,18 @@ class InvertedIndex:
         Додавання нової книги до індексу та ембеддінгів.
 
         :param new_book: Словник з атрибутами нової книги.
-        :param given_id: Id з яким треба зберегти книгу (за замовчанням встановлюється рівним останньому значенню в базі +1).
+        :param given_id: Id з яким треба зберегти книгу (за замовчуванням встановлюється рівним останньому значенню в базі +1).
         :return: Ідентифікатор доданої книги.
         """
         try:
-            doc_id = len(self.books) if given_id is None else given_id
-            default_book = {"title": "", "author": "", "description": "", "isbn": 0, "publish_year": 0, "genre": ""}
-            book_data = {key: new_book.get(key, default_book[key]) for key in default_book}
-            self.books[doc_id] = book_data
-            description = format_book_description(new_book)
-            self.add_tokens_to_index(doc_id, description)
-            self.update_embeddings(doc_id, description)
+            with self.lock:
+                doc_id = len(self.books) if given_id is None else given_id
+                default_book = {"title": "", "author": "", "description": "", "isbn": 0, "publish_year": 0, "genre": ""}
+                book_data = {key: new_book.get(key, default_book[key]) for key in default_book}
+                self.books[doc_id] = book_data
+                description = format_book_description(new_book)
+                self.add_tokens_to_index(doc_id, description)
+                self.update_embeddings(doc_id, description)
             self.save_books()
             self.save_index()
             self.save_embeddings()
@@ -246,14 +285,15 @@ class InvertedIndex:
         """
         try:
             if doc_id in self.books:
-                description = format_book_description(self.books[doc_id])
-                tokens = self.tokenize(description)
-                for token in tokens:
-                    self.index[token].discard(doc_id)
-                    if not self.index[token]:
-                        del self.index[token]
-                del self.books[doc_id]
-                del self.embeddings[doc_id]
+                with self.lock:
+                    description = format_book_description(self.books[doc_id])
+                    tokens = self.tokenize(description)
+                    for token in tokens:
+                        self.index[token].discard(doc_id)
+                        if not self.index[token]:
+                            del self.index[token]
+                    del self.books[doc_id]
+                    del self.embeddings[doc_id]
                 self.save_books()
                 self.save_index()
                 self.save_embeddings()
@@ -271,18 +311,70 @@ class InvertedIndex:
         """
         try:
             if doc_id in self.books:
-                current_data = self.books[doc_id]
-                new_data = {key: updated_data.get(key, current_data[key]) for key in current_data}
-                self.delete_book(doc_id)
-                self.add_book(new_data, doc_id)
+                with self.lock:
+                    # Отримання поточних даних книги
+                    current_data = self.books[doc_id]
+
+                    # Оновлення інформації про книгу
+                    for key, value in updated_data.items():
+                        current_data[key] = value
+
+                    # Оновлення індексу: видаляємо старі токени, додаємо нові
+                    old_tokens = self.tokenize(format_book_description(self.books[doc_id]))
+                    for token in old_tokens:
+                        if doc_id in self.index.get(token, set()):
+                            self.index[token].remove(doc_id)
+                            if not self.index[token]:
+                                del self.index[token]
+
+                    self.books[doc_id] = current_data
+
+                    # Додавання нових токенів
+                    self.add_tokens_to_index(doc_id, format_book_description(current_data))
+
+                    # Оновлення ембеддінгів
+                    self.update_embeddings(doc_id, format_book_description(current_data))
+
+                    # Збереження оновлених даних
+                self.save_books()
+                self.save_index()
+                self.save_embeddings()
             else:
                 raise ValueError(f"Book with ID {doc_id} not found.")
         except Exception as e:
             raise e
 
+    def search_books(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+        """
+        Пошук книг за допомогою індексу.
+        Повертається top_k книг, які збігаються з якомога більшою кількістю ключових слів, виділених з запиту.
+
+        :param query: Текст запиту для пошуку.
+        :param top_k: Кількість книг, яку треба знайти.
+        :return: Список книг, які відповідають запиту, у форматі [{'book_information': {...}, 'book_embedding': [...]}].
+        """
+        with self.lock:
+            tokens = self.tokenize(query)
+            found_books = defaultdict(int)
+
+            # Шукаємо всі книги, що містять усі токени з запиту
+            for token in tokens:
+                if token in self.index:
+                    for doc_id in self.index[token]:
+                        found_books[doc_id] += 1
+
+            # Фільтруємо тільки ті книги, що містять хоча б один токен
+            results = [
+                (doc_id, count) for doc_id, count in found_books.items()
+                if count >= 1
+            ]
+            # Сортуємо за кількістю знайдених токенів і беремо топ_k книг
+            results = sorted(results, key=lambda x: x[1], reverse=True)[:top_k]
+            # Повертаємо книги за їх ID
+            return [{'book_information': self.books[doc_id], 'book_embedding': self.embeddings[doc_id]} for doc_id, _ in results]
+
 
 if __name__ == "__main__":
-
     embedding_generator = BookEmbeddings()
     index = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv")
 
@@ -300,6 +392,9 @@ if __name__ == "__main__":
 
     # Видалення книги
     index.delete_book(book_id)
+
+    result = index.search_books(test_query)
+    print(result)
 
     # data = pd.read_csv('books_database_with_descriptions.csv')
     # for i, _ in data.iterrows():
