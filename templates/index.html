@@ -193,16 +193,28 @@
 <div class="results" id="results-container" style="display: none;"></div>
 
 <script>
-    // WebSocket connection
-    const socket = new WebSocket('ws://your-server-address'); // Подключаемся к серверу по WebSocket
-
     let previousQueries = [];
 
     function sendSearchRequest() {
         const searchQuery = document.getElementById('search-input').value.trim();
-        if (searchQuery) {
-            // Отправляем запрос на сервер
-            socket.send(JSON.stringify({action: 'search', query: searchQuery, previousQueries}));
+        if (searchQuery || previousQueries.length > 0) {
+            // Отправляем запрос на сервер через fetch
+            fetch('http://127.0.0.1:8080/search', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'search',
+                    user_query: previousQueries
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                renderResults(data.recommendations);
+                updateQueries();
+            })
+            .catch(error => console.error('Error:', error));
         }
     }
 
@@ -216,23 +228,23 @@
         resultsContainer.style.display = 'flex';
 
         resultsContainer.innerHTML = books.map(result => `
-        <div class="result-item">
-          <img src="${result.cover}" alt="Book Cover">
-          <div class="result-details">
-            <h3>${result.title}</h3>
-            <p>${result.description}</p>
-            <p><strong>Code:</strong> ${result.code}</p>
-            <p><strong>Author:</strong> ${result.author}</p>
-            <p><strong>Year:</strong> ${result.year}</p>
-            <p><strong>Relevance:</strong> <span style="color: ${getRelevanceColor(result.relevance)}">${result.relevance}%</span></p>
-          </div>
-        </div>
-      `).join('');
+            <div class="result-item">
+                <!--?<img src="${result.cover}" alt="Book Cover">-->
+                <div class="result-details">
+                    <h3>${result.title}</h3>
+                    <p>${result.description}</p>
+                    <p><strong>ISBN:</strong> ${result.isbn}</p>
+                    <p><strong>Author:</strong> ${result.author}</p>
+                    <p><strong>Year:</strong> ${result.year}</p>
+                    <p><strong>Relevance:</strong> <span style="color: ${getRelevanceColor(result.similarity)}">${result.similarity}%</span></p>
+                </div>
+            </div>
+        `).join('');
     }
 
-    function getRelevanceColor(relevance) {
-        if (relevance > 90) return 'green';
-        if (relevance > 70) return 'orange';
+    function getRelevanceColor(similarity) {
+        if (similarity > 90) return 'green';
+        if (similarity > 70) return 'orange';
         return 'red';
     }
 
@@ -241,6 +253,7 @@
             previousQueries.push(this.value.trim());
             updateQueries();
             sendSearchRequest();
+            this.value = '';
         }
     });
 
@@ -249,9 +262,6 @@
         const lastQueriesSection = document.getElementById('last-queries');
         lastQueriesSection.style.display = previousQueries.length ? 'block' : 'none';
         queriesContainer.innerHTML = previousQueries.map((query, index) => `<div class="query" data-index="${index}">${query}</div>`).join('');
-
-        // Send updated queries to backend
-        socket.send(JSON.stringify({action: 'updateQueries', queries: previousQueries}));
     }
 
     document.getElementById('queries-container').addEventListener('click', function (event) {
@@ -259,33 +269,23 @@
             const index = event.target.getAttribute('data-index');
             previousQueries.splice(index, 1);
             updateQueries();
+            sendSearchRequest();
         }
     });
 
     document.getElementById('reset-queries').addEventListener('click', function () {
         previousQueries = [];
         updateQueries();
+        const resultsContainer = document.getElementById('results-container');
+        const magnifier = document.getElementById('magnifier');
+        const promptText = document.getElementById('prompt-text');
+
+        resultsContainer.style.display = 'none';
+        magnifier.style.display = 'block';
+        promptText.style.display = 'block';
     });
 
-    // WebSocket events
-    socket.onopen = function () {
-        console.log('Connected to WebSocket server');
-    };
 
-    socket.onmessage = function (event) {
-        const data = JSON.parse(event.data);
-        if (data.action === 'bookList') {
-            renderResults(data.books); // Отображаем книги
-        }
-    };
-
-    socket.onerror = function (error) {
-        console.log('WebSocket Error: ', error);
-    };
-
-    socket.onclose = function () {
-        console.log('WebSocket connection closed');
-    };
 </script>
 </body>
 </html>

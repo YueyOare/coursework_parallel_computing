@@ -23,6 +23,15 @@ class TestInvertedIndex(unittest.TestCase):
         self.inverted_index = InvertedIndex(self.embedding_generator, index_file="test_index.csv",
                                             books_file="test_books.csv", embeddings_file="test_embeddings.csv")
 
+    @classmethod
+    def tearDownClass(cls):
+        if os.path.exists('test_index.csv'):
+            os.remove('test_index.csv')
+        if os.path.exists('test_books.csv'):
+            os.remove('test_books.csv')
+        if os.path.exists('test_embeddings.csv'):
+            os.remove('test_embeddings.csv')
+
     def test_add_book(self):
         """Тестування додавання книги до індексу"""
         book = {

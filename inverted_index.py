@@ -9,6 +9,8 @@ import torch
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 from transformers import DistilBertModel, DistilBertTokenizer
+from pybloom_live import BloomFilter
+from sklearn.metrics.pairwise import cosine_similarity
 
 
 class BookEmbeddings:
@@ -88,6 +90,7 @@ class InvertedIndex:
         self.index_file = index_file
         self.books_file = books_file
         self.embeddings_file = embeddings_file
+        self.bloom_filter = BloomFilter(capacity=100000, error_rate=0.001)
 
         self.lock = threading.Lock()
         self.file_lock = threading.Lock()
@@ -110,12 +113,25 @@ class InvertedIndex:
         Завантаження даних книг з CSV файлу.
 
         Якщо файл не існує, книги не завантажуються.
+        Якщо є кілька книг з однаковою назвою, автором та роком, але різними жанрами, вони об'єднуються в одну.
         """
         if os.path.exists(self.books_file):
             try:
                 books_df = pd.read_csv(self.books_file)
+                seen_books = {}
+
                 for _, row in books_df.iterrows():
-                    self.books[row['id']] = row.to_dict()
+                    book_key = (row['title'], row['author'], row['publish_year'])
+                    if book_key in seen_books:
+                        seen_books[book_key]['genre'] += f", {str(row['genre'])}"
+                    else:
+                        seen_books[book_key] = row.to_dict()
+                        seen_books[book_key]['genre'] = str(seen_books[book_key]['genre'])
+
+                for new_id, (key, book_data) in enumerate(seen_books.items()):
+                    book_data['id'] = new_id
+                    self.books[new_id] = book_data
+
             except Exception as e:
                 raise RuntimeError(f"Error loading books: {e}")
 
@@ -170,6 +186,7 @@ class InvertedIndex:
                         self.index[row['token']] = set(map(int, row['doc_ids'].split(',')))
                     else:
                         self.index[row['token']] = set()
+                    self.bloom_filter.add(row['token'])
             except Exception as e:
                 raise RuntimeError(f"Error loading index: {e}")
         else:
@@ -240,6 +257,7 @@ class InvertedIndex:
         """
         tokens = self.tokenize(description)
         for token in tokens:
+            self.bloom_filter.add(token)
             self.index[token].add(int(doc_id))
 
     def update_embeddings(self, doc_id: int, description: str) -> None:
@@ -295,6 +313,7 @@ class InvertedIndex:
                             del self.index[token]
                     del self.books[doc_id]
                     del self.embeddings[doc_id]
+                    self.regenerate_bloom_filter()
                 self.save_books()
                 self.save_index()
                 self.save_embeddings()
@@ -302,6 +321,18 @@ class InvertedIndex:
                 raise ValueError(f"Book with ID {doc_id} not found.")
         except Exception as e:
             raise e
+
+    def regenerate_bloom_filter(self) -> None:
+        """
+        Перегенерация Bloom Filter после удаления книги.
+        """
+        self.bloom_filter = BloomFilter(capacity=100000, error_rate=0.001)
+        # Добавляем все токены обратно в Bloom Filter
+        for doc_id, book in self.books.items():
+            description = format_book_description(book)
+            tokens = self.tokenize(description)
+            for token in tokens:
+                self.bloom_filter.add(token)
 
     def update_book(self, doc_id: int, updated_data: Dict[str, Union[str, int]]) -> None:
         """
@@ -325,6 +356,7 @@ class InvertedIndex:
                     self.books[doc_id] = current_data
                     self.add_tokens_to_index(doc_id, format_book_description(current_data))
                     self.update_embeddings(doc_id, format_book_description(current_data))
+                    self.regenerate_bloom_filter()
                 self.save_books()
                 self.save_index()
                 self.save_embeddings()
@@ -333,27 +365,27 @@ class InvertedIndex:
         except Exception as e:
             raise e
 
-    def search_books(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
+    def search_books(self, query: str, top_n: int = 100) -> List[Dict[str, Union[Dict[str, Union[str, int]], int, float]]]:
         """
-        Пошук книг за допомогою індексу.
-        Повертається top_k книг, які збігаються з якомога більшою кількістю ключових слів, виділених з запиту.
+        Поиск книг, соответствующих запросу.
 
-        :param query: Текст запиту для пошуку.
-        :param top_k: Кількість книг, яку треба знайти.
-        :return: Список книг, які відповідають запиту, у форматі [{'book_information': {...}, 'book_id': ...}]
+        :param query: Запрос для поиска.
+        :param top_n: Количество возвращаемых результатов.
+        :return: Список книг, отсортированных по релевантности.
         """
         try:
             tokens = self.tokenize(query)
+            valid_tokens = [token for token in tokens if token in self.bloom_filter]
+            if not valid_tokens:
+                return []
             doc_ids = set()
-            for token in tokens:
+            for token in valid_tokens:
                 doc_ids.update(self.index.get(token, set()))
-            result = []
-            for doc_id in doc_ids:
-                book_info = self.books[doc_id]
-                similarity = np.dot(self.embeddings[doc_id], self.embedding_generator.get_embedding(query))
-                result.append({'book_information': book_info, 'book_id': doc_id, 'similarity': similarity})
-
-            return sorted(result, key=lambda x: x['similarity'], reverse=True)[:top_k]
+            query_embedding = self.embedding_generator.get_embedding(query)
+            embeddings = [self.embeddings[book_id] for book_id in doc_ids]
+            similarities = cosine_similarity([query_embedding], embeddings).flatten()
+            sorted_books = sorted(zip(doc_ids, similarities), key=lambda x: x[1], reverse=True)
+            return [{'book_information': self.books[book_id], 'book_id': book_id, 'similarity': similarity} for book_id, similarity in sorted_books[:top_n]]
         except Exception as e:
             raise RuntimeError(f"Error searching for books: {e}")
 
@@ -365,15 +397,12 @@ if __name__ == "__main__":
     tokens = index.tokenize(test_query)
     print(tokens)
 
-    # Додавання нової книги
     book_id = index.add_book(
         {"title": "New Book", "author": "Author Name", "description": "A fascinating tale.", "isbn": "12345",
          "publish_year": 2024, "genre": "Fiction"})
-    #
-    # # Оновлення книги
+
     index.update_book(book_id, {"title": "Updated Book"})
 
-    # Видалення книги
     index.delete_book(book_id)
 
     result = index.search_books(test_query)

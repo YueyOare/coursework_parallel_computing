@@ -1,158 +1,236 @@
 import socket
-import threading
+from concurrent.futures import ThreadPoolExecutor
 import gzip
-import os
 import json
+import threading
 from jinja2 import Environment, FileSystemLoader
-from search import analyze_user_query, search_books
+from inverted_index import BookEmbeddings, InvertedIndex
+import logging
 
+# Конфигурация логирования
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] [%(levelname)s] %(message)s')
+
+# Конфигурация сервера
 HOST = '127.0.0.1'
 PORT = 8080
+TEMPLATES_DIR = 'templates'
+queries_to_show = 10
 
-# Глобальные переменные
-previous_queries = []
+# Инициализация окружения Jinja2
+env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
+template = env.get_template("index.html")
+
+# Инициализация BookEmbeddings и InvertedIndex
+embedding_generator = BookEmbeddings()
+index = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv")
+
 lock = threading.Lock()
 
-# Путь к директории с CSS и HTML файлами
-STATIC_DIR = 'static'
-TEMPLATES_DIR = 'templates'
-
-# Настроим Jinja2 для рендеринга шаблонов
-env = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
+# Пул потоков для обработки клиентов
+thread_pool = ThreadPoolExecutor(max_workers=10)
 
 def compress_html(content):
-    """Функция для сжатия HTML с использованием Gzip"""
+    """Сжатие HTML-контента с использованием Gzip."""
     return gzip.compress(content.encode('utf-8'))
 
-def handle_client(client_socket):
-    """Обработка запроса от клиента"""
+def handle_request(client_socket):
+    """Handle incoming client requests."""
     with client_socket:
-        request = client_socket.recv(2048).decode('utf-8')
-        print(f"[INFO] Клиент {client_socket} запросил: {request}")
+        try:
+            request = client_socket.recv(2048).decode('utf-8')
+            client_ip = client_socket.getpeername()[0]
+            logging.info(f"Received request from {client_ip}: {request}")
 
-        # Разбираем запрос клиента
-        if request.startswith('POST /search'):
-            try:
-                # Извлекаем Content-Length из заголовков
-                content_length = int([header.split(":")[1].strip() for header in request.split("\r\n") if "Content-Length" in header][0])
+            if request.startswith('POST /search'):
+                handle_post_request(client_socket, request)
 
-                # Находим начало тела запроса
-                request_parts = request.split("\r\n\r\n", 1)
-                if len(request_parts) < 2:
-                    raise ValueError("Неверный формат HTTP-запроса")
+            elif request.startswith('POST /admin'):
+                handle_admin_post_request(client_socket, request)
 
-                # Извлекаем тело запроса из request
-                body = request_parts[1][:content_length]
+            elif request.startswith('GET /admin HTTP/'):
+                handle_get_admin(client_socket)
 
-                # Парсим JSON из тела запроса
-                data = json.loads(body)
+            elif request.startswith('GET / HTTP/'):
+                handle_get_root(client_socket)
 
-                action = data.get("action")
-                user_query = data.get("user_query")
-                index_to_delete = data.get("index")
+            else:
+                logging.warning(f"Received unsupported request from {client_ip}: {request.splitlines()[0]}")
+                client_socket.sendall("HTTP/1.1 404 Not Found\n\n".encode('utf-8'))
 
-                if action == "search" and user_query:
-                    if user_query not in previous_queries:
-                        with lock:
-                            previous_queries.append(user_query)
-                    all_queries = ". ".join(previous_queries)
-
-                    titles, authors, genres, keywords = set(), set(), set(), ""
-                    titles, authors, genres, keywords = analyze_user_query(all_queries, titles, authors, genres, keywords)
-                    recommendations = search_books(titles, authors, genres, keywords)
-                    recommendations = recommendations[:10]
-
-                    response_data = {
-                        "previous_queries": previous_queries,
-                        "recommendations": recommendations
-                    }
-
-                elif action == "delete" and index_to_delete is not None:
-                    with lock:
-                        if 0 <= index_to_delete < len(previous_queries):
-                            previous_queries.pop(index_to_delete)
-                    all_queries = ". ".join(previous_queries)
-                    titles, authors, genres, keywords = analyze_user_query(all_queries, set(), set(), set(), "")
-                    recommendations = search_books(titles, authors, genres, keywords)
-                    recommendations = recommendations[:10]
-
-                    response_data = {
-                        "previous_queries": previous_queries,
-                        "recommendations": recommendations
-                    }
-
-                elif action == "clear":
-                    with lock:
-                        previous_queries.clear()
-                    response_data = {
-                        "previous_queries": [],
-                        "recommendations": []
-                    }
-
-                # Отправляем ответ клиенту
-                client_socket.sendall(
-                    "HTTP/1.1 200 OK\nContent-Type: application/json\n\n".encode('utf-8') +
-                    json.dumps(response_data).encode('utf-8')
-                )
-
-            except Exception as e:
-                print(f"[ERROR] Ошибка обработки POST-запроса: {e}")
-                client_socket.sendall("HTTP/1.1 500 Internal Server Error\n\n".encode('utf-8'))
-
-        elif request.startswith('GET / HTTP/'):
-            template = env.get_template("index.html")
-            rendered_html = template.render(previous_queries=previous_queries)
-            compressed_html = compress_html(rendered_html)
-            response_headers = (
-                'HTTP/1.1 200 OK\n'
-                'Content-Type: text/html; charset=utf-8\n'
-                'Content-Encoding: gzip\n'
-                'Cache-Control: public, max-age=3600\n'
-                'Connection: close\n\n'
-            )
-            client_socket.sendall(response_headers.encode('utf-8') + compressed_html)
-
-        elif request.startswith('GET /static/'):
-            filename = request.split(' ')[1][8:]
-            send_static_file(client_socket, filename)
-
-        else:
-            client_socket.sendall("HTTP/1.1 404 Not Found\n\n".encode('utf-8'))
-    print(f'Клиент {client_socket} отключился.')
+        except Exception as e:
+            logging.error(f"Error handling request from {client_ip}: {e}")
 
 
-def send_static_file(client_socket, filename):
-    """Функция отправки статического файла (например, CSS)"""
+
+def handle_get_admin(client_socket):
+    """Обработка GET-запроса для получения списка действий администратора."""
     try:
-        file_path = os.path.join(STATIC_DIR, filename)
-        if os.path.exists(file_path):
-            with open(file_path, 'rb') as file:
-                file_data = file.read()
-            response_headers = (
-                'HTTP/1.1 200 OK\n'
-                'Content-Type: text/css\n'
-                'Cache-Control: public, max-age=3600\n'
-                'Connection: close\n\n'
-            )
-            client_socket.sendall(response_headers.encode('utf-8') + file_data)
-        else:
-            response_headers = 'HTTP/1.1 404 Not Found\n\n'
-            client_socket.sendall(response_headers.encode('utf-8'))
+        actions = ["view_books", "add_book", "edit_book", "delete_book"]
+        response_data = json.dumps(actions)
+
+        client_socket.sendall(
+            "HTTP/1.1 200 OK\nContent-Type: application/json\n\n".encode('utf-8') +
+            response_data.encode('utf-8')
+        )
+        logging.info("Sent admin actions list successfully")
+
     except Exception as e:
-        print(f"[ERROR] Ошибка при отправке статики: {e}")
-        response_headers = 'HTTP/1.1 500 Internal Server Error\n\n'
-        client_socket.sendall(response_headers.encode('utf-8'))
+        logging.error(f"Error serving admin actions list: {e}")
+        client_socket.sendall("HTTP/1.1 500 Internal Server Error\n\n".encode('utf-8'))
+
+
+def handle_post_request(client_socket, request):
+    """Обработка POST-запросов для поиска."""
+    try:
+        content_length = int([header.split(":")[1].strip() for header in request.split("\r\n") if "Content-Length" in header][0])
+
+        request_parts = request.split("\r\n\r\n", 1)
+        if len(request_parts) < 2:
+            raise ValueError("Invalid HTTP request format")
+
+        body = request_parts[1][:content_length]
+        data = json.loads(body)
+
+        action = data.get("action")
+        user_query = data.get("user_query")
+        index_to_delete = data.get("index", -1)
+
+        logging.info(f"Action: {action}, User Query: {user_query}, Index to Delete: {index_to_delete}")
+
+        if action == "search" and user_query:
+            all_queries = ". ".join(user_query)
+            logging.info(f"Search performed with query: {all_queries}")
+            recommendations = index.search_books(all_queries)[:queries_to_show]
+
+            # Формирование списка рекомендаций для отправки на клиент
+            formatted_recommendations = [{
+                "isbn": book['book_information'].get('isbn'),
+                "title": book['book_information'].get('title'),
+                "author": book['book_information'].get('author'),
+                "year": book['book_information'].get('publish_year'),
+                "description": book['book_information'].get('description') if str(book['book_information'].get('description')) != 'nan' else '',
+                "cover": book['book_information'].get('cover', ''),
+                "similarity": round(book['similarity'] * 100, 2)
+            } for book in recommendations]
+
+            response_data = {
+                "recommendations": formatted_recommendations
+            }
+            logging.info(f"Search results: {[(book['book_id'], 
+                                              book['book_information'].get('title'),
+                                              book['similarity']) for book in recommendations]}")
+
+        client_socket.sendall(
+            "HTTP/1.1 200 OK\nContent-Type: application/json\n\n".encode('utf-8') +
+            json.dumps(response_data).encode('utf-8')
+        )
+        logging.info(f"Response sent successfully for action: {action}")
+
+    except Exception as e:
+        logging.error(f"Error processing POST request: {e}")
+        client_socket.sendall("HTTP/1.1 500 Internal Server Error\n\n".encode('utf-8'))
+
+
+def handle_admin_post_request(client_socket, request):
+    """Handle POST requests for admin actions."""
+    try:
+        content_length = int(
+            [header.split(":")[1].strip() for header in request.split("\r\n") if "Content-Length" in header][0])
+
+        request_parts = request.split("\r\n\r\n", 1)
+        if len(request_parts) < 2:
+            raise ValueError("Invalid HTTP request format")
+
+        body = request_parts[1][:content_length]
+        data = json.loads(body)
+
+        action = data.get("action")
+        book_data = data.get("book_data")
+        if not isinstance(book_data, list):
+            book_data = [book_data]
+        book_ids = data.get("book_ids", [])
+        if not isinstance(book_ids, list):
+            book_ids = [book_ids]
+
+        if action == "view_books":
+            books_list = [{"id": book_id, **book_info} for book_id, book_info in index.books.items()]
+            response_data = {"books": books_list}
+
+        elif action == "add_book" and book_data is not None:
+            try:
+                new_ids = [index.add_book(book) for book in book_data]
+                response_data = {"message": f"Books with IDs {new_ids} added successfully."}
+            except Exception as e:
+                response_data = {"error": f"Error adding books: {e}"}
+                logging.error(f"Error adding books: {e}")
+
+        elif action == "edit_book" and book_ids and book_data is not None:
+            try:
+                for book_id, book in zip(book_ids, book_data):
+                    index.update_book(int(book_id), book)
+                response_data = {"message": f"Books with IDs {book_ids} updated successfully."}
+            except Exception as e:
+                response_data = {"error": f"Error updating books: {e}"}
+                logging.error(f"Error updating books: {e}")
+
+        elif action == "delete_book" and book_ids:
+            try:
+                for book_id in book_ids:
+                    index.delete_book(int(book_id))
+                response_data = {"message": f"Books with IDs {book_ids} deleted successfully."}
+            except Exception as e:
+                response_data = {"error": f"Error deleting books: {e}"}
+                logging.error(f"Error deleting books: {e}")
+
+        else:
+            response_data = {"error": "Invalid action or missing data."}
+
+        client_socket.sendall(
+            "HTTP/1.1 200 OK\nContent-Type: application/json\n\n".encode('utf-8') +
+            json.dumps(response_data).encode('utf-8')
+        )
+        logging.info(f"Admin action '{action}' processed successfully.")
+
+    except Exception as e:
+        logging.error(f"Error processing admin POST request: {e}")
+        client_socket.sendall("HTTP/1.1 500 Internal Server Error\n\n".encode('utf-8'))
+
+
+def handle_get_root(client_socket):
+    """Обработка GET-запроса для корневого маршрута."""
+    try:
+        rendered_html = template.render(previous_queries=[])
+        compressed_html = compress_html(rendered_html)
+
+        response_headers = (
+            'HTTP/1.1 200 OK\n'
+            'Content-Type: text/html; charset=utf-8\n'
+            'Content-Encoding: gzip\n'
+            'Cache-Control: public, max-age=3600\n'
+            'Connection: close\n\n'
+        )
+
+        client_socket.sendall(response_headers.encode('utf-8') + compressed_html)
+        logging.info("Served index.html successfully")
+
+    except Exception as e:
+        logging.error(f"Error serving index.html: {e}")
+        client_socket.sendall("HTTP/1.1 500 Internal Server Error\n\n".encode('utf-8'))
 
 def start_server():
-    """Запуск сервера"""
+    """Запуск сервера для обработки клиентских соединений."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server_socket:
         server_socket.bind((HOST, PORT))
         server_socket.listen()
-        print(f"[INFO] Сервер запущен на http://{HOST}:{PORT}")
+        logging.info(f"Server started on http://{HOST}:{PORT}")
 
-        while True:
-            client_socket, _ = server_socket.accept()
-            threading.Thread(target=handle_client, args=(client_socket,)).start()
+        try:
+            while True:
+                client_socket, address = server_socket.accept()
+                logging.info(f"Accepted connection from {address}")
+                thread_pool.submit(handle_request, client_socket)
+        except KeyboardInterrupt:
+            logging.info("Server shutting down.")
 
 if __name__ == "__main__":
     start_server()
