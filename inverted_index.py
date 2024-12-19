@@ -1,16 +1,18 @@
 import os
-from collections import defaultdict
 import threading
-from typing import Dict, List, Union, Any
+from collections import defaultdict
+from typing import Dict, List, Union
 
 import numpy as np
 import pandas as pd
 import torch
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
-from transformers import DistilBertModel, DistilBertTokenizer
 from pybloom_live import BloomFilter
 from sklearn.metrics.pairwise import cosine_similarity
+from scipy.spatial.distance import euclidean, cityblock
+from sklearn.preprocessing import normalize
+from transformers import DistilBertModel, DistilBertTokenizer
 
 
 class BookEmbeddings:
@@ -44,7 +46,9 @@ class BookEmbeddings:
                 inputs = self.tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
                 with torch.no_grad():
                     outputs = self.model(**inputs)
-                return outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+                embedding = outputs.last_hidden_state[:, 0, :].squeeze().numpy()
+                embedding_norm = normalize([embedding])[0]
+                return embedding_norm
         except Exception as e:
             raise RuntimeError(f"Error generating embedding: {e}")
 
@@ -184,6 +188,11 @@ class InvertedIndex:
                 for _, row in index_df.iterrows():
                     if type(row['doc_ids']) == str:
                         self.index[row['token']] = set(map(int, row['doc_ids'].split(',')))
+                        doc_ids = set()
+                        for doc_id in self.index[row['token']]:
+                            if doc_id in self.books:
+                                doc_ids.add(doc_id)
+                        self.index[row['token']] = doc_ids
                     else:
                         self.index[row['token']] = set()
                     self.bloom_filter.add(row['token'])
@@ -286,7 +295,7 @@ class InvertedIndex:
                 default_book = {"title": "", "author": "", "description": "", "isbn": 0, "publish_year": 0, "genre": ""}
                 book_data = {key: new_book.get(key, default_book[key]) for key in default_book}
                 self.books[doc_id] = book_data
-                description = format_book_description(new_book)
+                description = format_book_description(book_data)
                 self.add_tokens_to_index(doc_id, description)
                 self.update_embeddings(doc_id, description)
             self.save_books()
@@ -365,13 +374,14 @@ class InvertedIndex:
         except Exception as e:
             raise e
 
-    def search_books(self, query: str, top_n: int = 100) -> List[Dict[str, Union[Dict[str, Union[str, int]], int, float]]]:
+    def search_books(self, query: str, top_n: int = 100) -> List[
+        Dict[str, Union[Dict[str, Union[str, int]], int, float]]]:
         """
-        Поиск книг, соответствующих запросу.
+        Пошук книг, що відповідають запиту.
 
-        :param query: Запрос для поиска.
-        :param top_n: Количество возвращаемых результатов.
-        :return: Список книг, отсортированных по релевантности.
+        :param query: Запит для пошуку.
+        :param top_n: Кількість повертаємих результатів.
+        :return: Список книг, відсортованих за релевантністю.
         """
         try:
             tokens = self.tokenize(query)
@@ -383,11 +393,16 @@ class InvertedIndex:
                 doc_ids.update(self.index.get(token, set()))
             query_embedding = self.embedding_generator.get_embedding(query)
             embeddings = [self.embeddings[book_id] for book_id in doc_ids]
+
             similarities = cosine_similarity([query_embedding], embeddings).flatten()
+            # similarities = euclidean([query_embedding], embeddings).flatten()
+
             sorted_books = sorted(zip(doc_ids, similarities), key=lambda x: x[1], reverse=True)
-            return [{'book_information': self.books[book_id], 'book_id': book_id, 'similarity': similarity} for book_id, similarity in sorted_books[:top_n]]
+            return [{'book_information': self.books[book_id], 'book_id': book_id, 'similarity': similarity} for
+                    book_id, similarity in sorted_books[:top_n]]
         except Exception as e:
             raise RuntimeError(f"Error searching for books: {e}")
+
 
 if __name__ == "__main__":
     embedding_generator = BookEmbeddings()
