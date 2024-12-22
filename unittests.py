@@ -1,5 +1,4 @@
 import unittest
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from inverted_index import *
 
@@ -43,7 +42,7 @@ class TestInvertedIndex(unittest.TestCase):
             "genre": "Fiction"
         }
         book_id = self.inverted_index.add_book(book)
-        self.assertIn(book_id, self.inverted_index.books)
+        self.assertIn(book_id, self.inverted_index.get_books())
 
     def test_delete_book(self):
         """Тестування видалення книги з індексу"""
@@ -57,7 +56,7 @@ class TestInvertedIndex(unittest.TestCase):
         }
         book_id = self.inverted_index.add_book(book)
         self.inverted_index.delete_book(book_id)
-        self.assertNotIn(book_id, self.inverted_index.books)
+        self.assertNotIn(book_id, self.inverted_index.get_books())
 
     def test_update_book(self):
         """Тестування оновлення книги в індексі"""
@@ -76,8 +75,9 @@ class TestInvertedIndex(unittest.TestCase):
             "description": "Updated description of the book."
         }
         self.inverted_index.update_book(book_id, updated_data)
-        self.assertEqual(self.inverted_index.books[book_id]['title'], "Updated Book Title")
-        self.assertEqual(self.inverted_index.books[book_id]['author'], "Updated Author Name")
+        books = self.inverted_index.get_books()
+        self.assertEqual(books[book_id]['title'], "Updated Book Title")
+        self.assertEqual(books[book_id]['author'], "Updated Author Name")
 
     def test_search_books(self):
         """Тестування пошуку книг за запитом"""
@@ -108,9 +108,8 @@ class TestInvertedIndex(unittest.TestCase):
         self.assertEqual(result[0]['book_information']['title'], "Book One")
 
     def test_concurrent_updates_with_thread_pool(self):
-        self.inverted_index.books = {}
-        self.inverted_index.index = defaultdict(set)
-        self.inverted_index.embeddings = {}
+        self.tearDownClass()
+        self.setUp()
 
         """Тестування з пулом потоків для одночасних оновлень"""
         def add_book():
@@ -123,12 +122,14 @@ class TestInvertedIndex(unittest.TestCase):
                 "genre": "Fiction"
             }
             self.inverted_index.add_book(book)
+
         with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(add_book) for _ in range(10)]
             for future in as_completed(futures):
                 future.result()
 
-        self.assertEqual(len(self.inverted_index.books), 10)
+        books = self.inverted_index.get_books()
+        self.assertEqual(len(books), 10)
 
 if __name__ == "__main__":
     unittest.main()
