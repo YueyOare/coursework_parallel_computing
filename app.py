@@ -38,7 +38,7 @@ template = env.get_template("index.html")
 embedding_generator: BookEmbeddings = BookEmbeddings()
 index: InvertedIndex = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv", num_threads=2)
 
-thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=8)
+thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=16)
 
 
 def compress_html(content: str) -> bytes:
