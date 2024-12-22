@@ -2,7 +2,6 @@ import gzip
 import json
 import logging
 import socket
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
@@ -37,10 +36,9 @@ env: Environment = Environment(loader=FileSystemLoader(TEMPLATES_DIR))
 template = env.get_template("index.html")
 
 embedding_generator: BookEmbeddings = BookEmbeddings()
-index: InvertedIndex = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv")
+index: InvertedIndex = InvertedIndex(embedding_generator, books_file="books_database_with_descriptions.csv", num_threads=2)
 
-lock: threading.Lock = threading.Lock()
-thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=10)
+thread_pool: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=8)
 
 
 def compress_html(content: str) -> bytes:
@@ -100,7 +98,8 @@ def handle_admin_post_request(client_socket: socket.socket, request: str) -> Non
         book_ids = data.get("book_ids", [])
 
         if action == "view_books":
-            books_list = [{"id": book_id, **book_info} for book_id, book_info in index.books.items()]
+            books = index.get_books()
+            books_list = [{"id": book_id, **book_info} for book_id, book_info in books.items()]
             response_data = {"books": books_list}
             log_info("Список книг успішно відправлено.")
 

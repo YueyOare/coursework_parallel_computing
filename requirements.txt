@@ -1,0 +1,10 @@
+colorama
+jinja2
+matplotlib
+nltk
+numpy
+pandas
+pybloom_live
+scikit-learn
+torch
+transformers

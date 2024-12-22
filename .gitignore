@@ -1,9 +1,4 @@
-<<<<<<< Updated upstream
 /.venv/
 /.idea/
 main.py
-=======
-/main.py
-/.idea/
-/.venv/
->>>>>>> Stashed changes
+result.csv
